@@ -1,0 +1,203 @@
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const CryptoJS = require('crypto-js');
+const { Pool } = require('pg');
+const axios = require('axios');
+const { compareSync, hash } = require('bcryptjs');
+require('dotenv').config();
+const { v4: uuidv4 } = require('uuid');
+const API_KEY_CODE = process.env.API_KEY_CODE;
+const SECRET_KEY = process.env.SECRET_KEY;
+const PREFIX = process.env.PREFIX;
+const captchaSecretKey = process.env.CAPTCHA_SECRET_KEY_TEST;
+const profileRouter = express.Router();
+
+const config = require('../config.json');
+
+const pool = new Pool(config.db);
+
+const app = express();
+app.use(express.json());
+app.use('/profile', profileRouter);
+
+const validateApiKey = async (req, res, next) => {
+    const apiKey = req.header('x-api-key');
+
+    const sourceApiKeys = await pool.query('SELECT "Id" FROM "' + PREFIX + 'APIKeys" WHERE "Code" = $1', [API_KEY_CODE])
+    const sourceApiKey = sourceApiKeys.rows[0].Id;
+
+    if (apiKey && apiKey === sourceApiKey) {
+        next();
+    } else {
+        res.status(401).json({ message: 'Yetkisiz erişim: API anahtarı hatalı.' });
+    }
+};
+
+const authMiddleware = (req, res, next) => {
+    const token = req.headers['x-access-token'];  // Token'i istek başlığından al
+
+    if (!token) {
+        return res.status(403).json({ message: 'Session token gönderilmedi.' });
+    }
+
+    // Token'i doğrula
+    jwt.verify(token, SECRET_KEY, (err, decoded) => {
+        if (err) {
+            return res.status(401).json({ message: 'Session token doğrulanamadı.' });
+        }
+
+        // Token geçerli ise decoded verisini req.user'a ekleyerek sonraki aşamaya geç
+        req.user = decoded;
+        next();
+    });
+};
+
+profileRouter.use((req, res, next) => {
+
+    // "/submit" rotası için middleware'i atla
+    if (req.path === "/submit-captcha") return next();
+    validateApiKey(req, res, next);
+});
+
+// Profile ana bilgileri görüntüleme
+profileRouter.get('/', authMiddleware, async (req, res) => {
+    const customerId = req.user?.customerId;
+
+    try {
+        const result = await pool.query('SELECT "Name", "Surname", "EmailAddress", "EmailVerificationStatus", "PhoneVerificationStatus" FROM "' + PREFIX + 'Customers" WHERE "Id" = $1', [customerId]);
+        const user = result.rows[0];
+
+        if (result.rows.length == 0) {
+            return res.status(404).json({ message: 'Kullanıcı bulunamadı.' });
+        }
+
+        const profileData = {
+            name: user.Name,
+            surname: user.Surname,
+            email: user.EmailAddress,
+            avatar: null
+        };
+
+        const twoFactorSettings = {
+            email: user.EmailVerificationStatus,
+            sms: user.PhoneVerificationStatus
+        };
+
+        const resultBankAddresses = await pool.query('SELECT "Name", "Surname", "EmailAddress", "EmailVerificationStatus", "PhoneVerificationStatus" FROM "' + PREFIX + 'Customers" WHERE "Id" = $1', [customerId]);
+        const bankAddresses = result.rows;
+
+        var bankAddress = {
+            bankName: 'İş Bankası',                   // Frontend gorunecek isim
+            iban: 'TR12 0006 1005 1978 6457 8413 01', // gorunecek iban
+            icon: 'https://i.imgur.com/lKLrQTB.png',  // gorunecek icon url
+            createdAt: '7 Haziran 2024',              // gorunecek tarih
+            txCount: '4'                              // gorunecek islem sayisi
+        };
+
+        var selectableBanks = {
+            name: 'Akbank',                         // Frontendde goruncek isim
+            code: 'Akbank',                         // Size iletecegimiz banka idsi yada identifier
+            icon: 'https://i.imgur.com/WYyMXgu.png' // icon image url i
+        };
+
+        var cryptoAssetTypes = {
+            name: 'Avalanche',                         // Frontendde goruncek isim
+            code: 'Avalanche',                         // Size iletecegimiz varlik idsi yada identifier
+            icon: 'https://i.imgur.com/WYyMXgu.png'    // icon image url i
+        };
+
+        var walletAddresses = {
+            walletAddress: '0x209A0FF07BeF1F3316C3a27BB6cA0E7732fA56FD', // gorunecek wallet adresi
+            chainName: 'Avalanche C-Chain',                              // Chain ismi
+            createdAt: '7 Haziran 2024',                                 // gorunecek tarih
+            assetType: 'MTLK',                                           // Varlik Tipi
+            icon: 'https://resim.bilmemne/url.jpeg'                      // gorunecek varlik icon url
+        };
+
+        var txData = {
+            depositTotal: '160.000',
+            withdrawMonth: {
+                limit: '350.000',
+                used: '140.000',
+                remaining: '210.000'
+            },
+            withdrawDay: {
+                limit: '11.670',
+                used: '2.334',
+                remaining: '9.336'
+            }
+        }
+
+        res.status(200).json({ profileData, twoFactorSettings, bankAddresses, selectableBanks, cryptoAssetTypes, walletAddresses, txData });
+    } catch (err) {
+        res.status(500).json({ message: 'Profil yüklenemedi.', error: err.message });
+    }
+});
+
+// Şifre değiştirme 
+profileRouter.post('/password-change', authMiddleware, async (req, res) => {
+    const { oldPassword, newPassword, confirmNewPassword } = req.body;
+    const customerId = req.user?.customerId;
+    try {
+
+        // Token doğrulama ve kullanıcıyı bulma
+        const result = await pool.query('SELECT "HashedPassword" FROM "' + PREFIX + 'Customers"  WHERE "Id" = $1 ', [customerId]);
+
+        const passwordLog = result.rows[0];
+        const passwordRegex = /^(?=.*[a-zçğıöşü])(?=.*[A-ZÇĞİÖŞÜ])(?=.*[@$!%*?&.,;:])[A-Za-zçÇğĞıİöÖşŞüÜ\d@$!%*?&.,;:]{8,}$/;
+        const hashedPassword = CryptoJS.SHA256(newPassword).toString(CryptoJS.enc.Hex);
+        const hashedOldPassword = CryptoJS.SHA256(oldPassword).toString(CryptoJS.enc.Hex);
+        console.log(hashedOldPassword + '---' + passwordLog.HashedPassword)
+
+        if (!newPassword || !passwordRegex.test(newPassword)) {
+            return res.status(400).json({ message: 'Şifrenizi geçerli formatta giriniz.' });
+        }
+
+        if (newPassword != confirmNewPassword) {
+            return res.status(400).json({ message: 'Şifreler eşleşmiyor.' });
+        }
+
+        if (hashedOldPassword != passwordLog.HashedPassword) {
+            return res.status(400).json({ message: 'Şifreniz yanlış!' });
+        }
+
+        if (newPassword == oldPassword) {
+            return res.status(400).json({ message: 'Şifreniz önceki şifreniz ile aynı olamaz.' });
+        }
+
+        var id = uuidv4();
+        var updateTime = new Date();
+        var updateType = "Profile";
+
+        try {
+            const resultUpdatePassword = await pool.query('UPDATE "' + PREFIX + 'Customers" SET "HashedPassword" = $1', [hashedPassword]);
+            const resultUpdateLogs = await pool.query('INSERT INTO "' + PREFIX + 'PasswordResetLogs" ("Id", "CustomerId", "UpdateDate", "UpdateType") VALUES ($1, $2, $3, $4)', [id, customerId, updateTime, updateType]);
+
+            return res.status(200).json({ message: 'Şifreniz başarılı şekilde sıfırlandı.' });
+        } catch (error) {
+
+            return res.status(500).json({ message: 'Şifre sıfırlama hatası!', hata: error.message });
+        }
+
+    } catch (error) {
+        return res.status(500).json({ message: 'Şifre sıfırlama hatası!', hata: error.message });
+    }
+
+});
+
+// Banka hesaplarını listeleme
+profileRouter.get('/bank-accounts', authMiddleware, async (req, res) => {
+    // Banka hesaplarını döndürme işlemleri burada yapılır
+    res.status(200).json({ bankAccounts: [] });
+});
+
+// Yeni banka hesabı ekleme
+profileRouter.post('/bank-accounts', (req, res) => {
+    const { accountName, accountNumber } = req.body;
+
+    // Yeni banka hesabı ekleme işlemleri burada yapılır
+    res.status(201).json({ message: 'Bank account added successfully' });
+});
+
+// Profile router'ı dışa aktar
+module.exports = profileRouter;

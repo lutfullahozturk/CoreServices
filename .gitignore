@@ -1,0 +1,7 @@
+.env
+
+config.json
+
+node_modules/
+
+Dockerfile
