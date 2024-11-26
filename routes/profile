@@ -83,16 +83,15 @@ profileRouter.get('/', authMiddleware, async (req, res) => {
             sms: user.PhoneVerificationStatus
         };
 
-        const resultBankAddresses = await pool.query('SELECT "Name", "Surname", "EmailAddress", "EmailVerificationStatus", "PhoneVerificationStatus" FROM "' + PREFIX + 'Customers" WHERE "Id" = $1', [customerId]);
-        const bankAddresses = result.rows;
-
-        var bankAddress = {
-            bankName: 'İş Bankası',                   // Frontend gorunecek isim
-            iban: 'TR12 0006 1005 1978 6457 8413 01', // gorunecek iban
-            icon: 'https://i.imgur.com/lKLrQTB.png',  // gorunecek icon url
-            createdAt: '7 Haziran 2024',              // gorunecek tarih
-            txCount: '4'                              // gorunecek islem sayisi
-        };
+        const resultBankAddresses = await pool.query(`SELECT 
+            bd."BankName" AS "bankName", 
+            ba."IBAN" AS "iban", 
+            bd."Icon" AS "icon", 
+            ba."CreatedAt" AS "createdAt" 
+            FROM "` + PREFIX + `CustomerBankAccounts"  ba 
+            INNER JOIN "` + PREFIX + `BankDefinitions" bd ON bd."Id" = ba."BankId" 
+            WHERE ba."CustomerId" = $1`, [customerId]);
+        var bankAddresses = resultBankAddresses.rows;
 
         var selectableBanks = {
             name: 'Akbank',                         // Frontendde goruncek isim
@@ -187,16 +186,48 @@ profileRouter.post('/password-change', authMiddleware, async (req, res) => {
 
 // Banka hesaplarını listeleme
 profileRouter.get('/bank-accounts', authMiddleware, async (req, res) => {
-    // Banka hesaplarını döndürme işlemleri burada yapılır
-    res.status(200).json({ bankAccounts: [] });
+    const customerId = req.user?.customerId;
+
+    try {
+
+        const result = await pool.query('SELECT * FROM "' + PREFIX + 'CustomerBankAccounts"  WHERE "CustomerId" = $1 ', [customerId]);
+
+        return res.status(200).json({ bankAccounts: result.rows });
+    }catch(error){
+        return res.status(500).json({ message: 'Banka hesapları getirilemedi!', hata: error.message });
+    }
+
+    
 });
 
 // Yeni banka hesabı ekleme
-profileRouter.post('/bank-accounts', (req, res) => {
-    const { accountName, accountNumber } = req.body;
+profileRouter.post('/bank-accounts/add', authMiddleware, async (req, res) => {
+    const { bankId, Iban } = req.body;
+    const customerId = req.user?.customerId;
+    var id = uuidv4();
+    var createTime = new Date();
+    var active = true;
 
-    // Yeni banka hesabı ekleme işlemleri burada yapılır
-    res.status(201).json({ message: 'Bank account added successfully' });
+    try {       
+        const checkResult = await pool.query('SELECT * FROM "' + PREFIX + 'CustomerBankAccounts" WHERE "CustomerId"= $1 AND "IBAN" = $2 AND "Active" = $3', [customerId, Iban, true]);
+        
+        if (checkResult.rowCount > 0) {
+            return res.status(400).json({ message: 'Bu IBAN daha önce eklenmiş!' });
+        }
+
+        if (!bankId) {
+            return res.status(400).json({ message: 'Seçilen banka geçersiz!' });
+        }
+
+        if (!Iban) {
+            return res.status(400).json({ message: 'IBAN geçersiz!' });
+        }
+
+        const resultInsert = await pool.query('INSERT INTO "' + PREFIX + 'CustomerBankAccounts" ("Id", "CustomerId", "BankId", "IBAN", "CreatedAt", "Active") VALUES ($1, $2, $3, $4, $5, $6)', [id, customerId, bankId, Iban, createTime, active]);
+        return res.status(201).json({ message: 'Banka hesabınız başarılı şekilde eklendi.'});
+    }catch(error){
+        return res.status(500).json({ message: 'Banka hesabı eklenemedi!', hata: error.message });
+    }
 });
 
 // Profile router'ı dışa aktar
