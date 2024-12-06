@@ -23,13 +23,13 @@ app.use('/profile', profileRouter);
 const validateApiKey = async (req, res, next) => {
     const apiKey = req.header('x-api-key');
 
-    const sourceApiKeys = await pool.query('SELECT "Id" FROM "' + PREFIX + 'APIKeys" WHERE "Code" = $1', [API_KEY_CODE])
+    const sourceApiKeys = await pool.query('SELECT "Id" FROM "' + PREFIX + 'POAPIKeys" WHERE "Code" = $1', [API_KEY_CODE])
     const sourceApiKey = sourceApiKeys.rows[0].Id;
 
     if (apiKey && apiKey === sourceApiKey) {
         next();
     } else {
-        res.status(401).json({ message: 'Yetkisiz erişim: API anahtarı hatalı.' });
+        return res.status(401).json({ message: 'Yetkisiz erişim: API anahtarı hatalı.' });
     }
 };
 
@@ -59,12 +59,20 @@ profileRouter.use((req, res, next) => {
     validateApiKey(req, res, next);
 });
 
-// Profile ana bilgileri görüntüleme
+// Profilde ana bilgileri görüntüleme
 profileRouter.get('/', authMiddleware, async (req, res) => {
     const customerId = req.user?.customerId;
 
     try {
-        const result = await pool.query('SELECT "Name", "Surname", "EmailAddress", "EmailVerificationStatus", "PhoneVerificationStatus" FROM "' + PREFIX + 'Customers" WHERE "Id" = $1', [customerId]);
+        const result = await pool.query(`SELECT 
+            "Name", 
+            "Surname", 
+            "EmailAddress", 
+            "PhoneNumber",
+            "EmailVerificationStatus", 
+            "PhoneVerificationStatus" 
+            FROM "` + PREFIX + `Customers" 
+            WHERE "Id" = $1`, [customerId]);
         const user = result.rows[0];
 
         if (result.rows.length == 0) {
@@ -75,6 +83,7 @@ profileRouter.get('/', authMiddleware, async (req, res) => {
             name: user.Name,
             surname: user.Surname,
             email: user.EmailAddress,
+            phoneNumber: user.PhoneNumber,
             avatar: null
         };
 
@@ -89,52 +98,30 @@ profileRouter.get('/', authMiddleware, async (req, res) => {
             bd."Icon" AS "icon", 
             ba."CreatedAt" AS "createdAt" 
             FROM "` + PREFIX + `CustomerBankAccounts"  ba 
-            INNER JOIN "` + PREFIX + `BankDefinitions" bd ON bd."Id" = ba."BankId" 
+            LEFT JOIN "` + PREFIX + `POBanks" bd ON bd."Id" = ba."BankId" 
             WHERE ba."CustomerId" = $1`, [customerId]);
         var bankAddresses = resultBankAddresses.rows;
 
-        var selectableBanks = {
-            name: 'Akbank',                         // Frontendde goruncek isim
-            code: 'Akbank',                         // Size iletecegimiz banka idsi yada identifier
-            icon: 'https://i.imgur.com/WYyMXgu.png' // icon image url i
-        };
+        const resultWalletAddresses = await pool.query(`SELECT 
+            w."Address" AS "walletAdress", 
+            w."ChainType" AS "chainName", 
+            w."StartDate" AS "createdAt",
+            w."Currency" AS "assetType", 
+            c."Icon" AS "icon"
+            FROM "` + PREFIX + `CustomerWallets"  w 
+            LEFT JOIN "` + PREFIX + `POCoins" c ON c."Name" = w."Currency" 
+            WHERE w."CustomerId" = $1`, [customerId]);
 
-        var cryptoAssetTypes = {
-            name: 'Avalanche',                         // Frontendde goruncek isim
-            code: 'Avalanche',                         // Size iletecegimiz varlik idsi yada identifier
-            icon: 'https://i.imgur.com/WYyMXgu.png'    // icon image url i
-        };
+        var walletAddresses = resultWalletAddresses.rows;
 
-        var walletAddresses = {
-            walletAddress: '0x209A0FF07BeF1F3316C3a27BB6cA0E7732fA56FD', // gorunecek wallet adresi
-            chainName: 'Avalanche C-Chain',                              // Chain ismi
-            createdAt: '7 Haziran 2024',                                 // gorunecek tarih
-            assetType: 'MTLK',                                           // Varlik Tipi
-            icon: 'https://resim.bilmemne/url.jpeg'                      // gorunecek varlik icon url
-        };
-
-        var txData = {
-            depositTotal: '160.000',
-            withdrawMonth: {
-                limit: '350.000',
-                used: '140.000',
-                remaining: '210.000'
-            },
-            withdrawDay: {
-                limit: '11.670',
-                used: '2.334',
-                remaining: '9.336'
-            }
-        }
-
-        res.status(200).json({ profileData, twoFactorSettings, bankAddresses, selectableBanks, cryptoAssetTypes, walletAddresses, txData });
+        return res.status(200).json({ profileData, twoFactorSettings, bankAddresses, walletAddresses });
     } catch (err) {
-        res.status(500).json({ message: 'Profil yüklenemedi.', error: err.message });
+        return res.status(500).json({ message: 'Profil yüklenemedi.', error: err.message });
     }
 });
 
 // Şifre değiştirme 
-profileRouter.post('/password-change', authMiddleware, async (req, res) => {
+profileRouter.post('/change-password', authMiddleware, async (req, res) => {
     const { oldPassword, newPassword, confirmNewPassword } = req.body;
     const customerId = req.user?.customerId;
     try {
@@ -149,18 +136,22 @@ profileRouter.post('/password-change', authMiddleware, async (req, res) => {
         console.log(hashedOldPassword + '---' + passwordLog.HashedPassword)
 
         if (!newPassword || !passwordRegex.test(newPassword)) {
+            console.log({ message: 'Şifrenizi geçerli formatta giriniz.' });
             return res.status(400).json({ message: 'Şifrenizi geçerli formatta giriniz.' });
         }
 
         if (newPassword != confirmNewPassword) {
+            console.log({ message: 'Şifreler eşleşmiyor.' });
             return res.status(400).json({ message: 'Şifreler eşleşmiyor.' });
         }
 
         if (hashedOldPassword != passwordLog.HashedPassword) {
+            console.log({ message: 'Şifreniz yanlış!' });
             return res.status(400).json({ message: 'Şifreniz yanlış!' });
         }
 
         if (newPassword == oldPassword) {
+            console.log({ message: 'Şifreniz önceki şifreniz ile aynı olamaz.' });
             return res.status(400).json({ message: 'Şifreniz önceki şifreniz ile aynı olamaz.' });
         }
 
@@ -169,66 +160,125 @@ profileRouter.post('/password-change', authMiddleware, async (req, res) => {
         var updateType = "Profile";
 
         try {
-            const resultUpdatePassword = await pool.query('UPDATE "' + PREFIX + 'Customers" SET "HashedPassword" = $1', [hashedPassword]);
-            const resultUpdateLogs = await pool.query('INSERT INTO "' + PREFIX + 'PasswordResetLogs" ("Id", "CustomerId", "UpdateDate", "UpdateType") VALUES ($1, $2, $3, $4)', [id, customerId, updateTime, updateType]);
+
+            const response = await axios.post('http://emakin-web.tokenization.svc.cluster.local:80/rest/v1/initiateByProcess', {
+                apiKey: "4a73969d-c4d1-4908-9a3d-6b080b2e05fe",
+                logonId: "support@bt.guru",
+                logonProvider: "Organization",
+                process: "c45309be-a1f7-4ef9-bf81-c695772911cc",
+                task: "b5b7697a-2e5d-49ae-bdcf-f9e16345ec3c",
+                version: null,
+                data: `<ProfilePasswordResetManagement>
+                            <CustomerId>${customerId}</CustomerId>
+                            <HashedPassword>${hashedPassword}</HashedPassword>
+                            <IPAddress>${req.ip}</IPAddress>
+                        </ProfilePasswordResetManagement>`,
+                culture: null
+            });
 
             return res.status(200).json({ message: 'Şifreniz başarılı şekilde sıfırlandı.' });
         } catch (error) {
 
-            return res.status(500).json({ message: 'Şifre sıfırlama hatası!', hata: error.message });
+            console.log({ message: 'Şifre sıfırlama hatası!', error: error.message, IP: req.ip });
+            return res.status(500).json({ message: 'Şifre sıfırlama hatası!', error: error.message });
         }
 
     } catch (error) {
-        return res.status(500).json({ message: 'Şifre sıfırlama hatası!', hata: error.message });
+        console.log({ message: 'Şifre sıfırlama hatası!', error: error.message, IP: req.ip });
+        return res.status(500).json({ message: 'Şifre sıfırlama hatası!', error: error.message });
     }
 
 });
 
 // Banka hesaplarını listeleme
-profileRouter.get('/bank-accounts', authMiddleware, async (req, res) => {
+profileRouter.post('/add-wallets', authMiddleware, async (req, res) => {
+    const { walletAddress } = req.body;
     const customerId = req.user?.customerId;
 
     try {
 
-        const result = await pool.query('SELECT * FROM "' + PREFIX + 'CustomerBankAccounts"  WHERE "CustomerId" = $1 ', [customerId]);
+        try {
+            const response = await axios.post('http://emakin-web.tokenization.svc.cluster.local:80/rest/v1/initiateByProcess', {
+                apiKey: "4a73969d-c4d1-4908-9a3d-6b080b2e05fe",
+                logonId: "support@bt.guru",
+                logonProvider: "Organization",
+                process: "c45309be-a1f7-4ef9-bf81-c695772911cc",
+                task: "f0a03ccf-b313-4a6c-b23b-117e37ebe571",
+                version: null,
+                data: `<CustomerWalletsManagement>
+                            <CustomerId>${customerId}</CustomerId>
+                            <WalletAddress>${walletAddress}</WalletAddress>
+                        </CustomerWalletsManagement>`,
+                culture: null
+            });
 
-        return res.status(200).json({ bankAccounts: result.rows });
-    }catch(error){
-        return res.status(500).json({ message: 'Banka hesapları getirilemedi!', hata: error.message });
+        } catch (error) {
+            return res.status(500).json({ message: 'Cüzdanlar eklenemedi! (initiate error)', hata: error.response.data });
+        }
+
+        return res.status(201).json({ message: 'Cüzdanlarınız başarılı şekilde eklendi.' });
+
+    } catch (error) {
+        return res.status(500).json({ message: 'Cüzdanlar eklenemedi!', hata: error.message });
     }
 
-    
 });
 
 // Yeni banka hesabı ekleme
-profileRouter.post('/bank-accounts/add', authMiddleware, async (req, res) => {
-    const { bankId, Iban } = req.body;
+profileRouter.post('/add-bank-account', authMiddleware, async (req, res) => {
+    const { iban } = req.body;
     const customerId = req.user?.customerId;
-    var id = uuidv4();
-    var createTime = new Date();
-    var active = true;
+    const ibanPattern = /^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$/;
 
-    try {       
-        const checkResult = await pool.query('SELECT * FROM "' + PREFIX + 'CustomerBankAccounts" WHERE "CustomerId"= $1 AND "IBAN" = $2 AND "Active" = $3', [customerId, Iban, true]);
-        
-        if (checkResult.rowCount > 0) {
+    const countryCode = iban.slice(0, 2);
+    const bankCode = iban.slice(6, 9); // Banka kodu 6-9 arası karakterler 
+    console.log(bankCode);
+
+    try {
+
+        const bankResult = await pool.query('SELECT * FROM "' + PREFIX + 'POBanks" WHERE "BankCode" = $1', [bankCode]);
+        const bankDefinition = bankResult.rows[0];
+        var bankId = null;
+
+        const cbaResult = await pool.query('SELECT * FROM "' + PREFIX + 'CustomerBankAccounts" WHERE "CustomerId"= $1 AND "IBAN" = $2 AND "Active" = $3', [customerId, iban, true]);
+
+        if (bankResult.rowCount != 0) {
+            bankId = bankDefinition.Id;
+        }
+
+        if (cbaResult.rowCount > 0) {
             return res.status(400).json({ message: 'Bu IBAN daha önce eklenmiş!' });
         }
 
-        if (!bankId) {
-            return res.status(400).json({ message: 'Seçilen banka geçersiz!' });
-        }
-
-        if (!Iban) {
+        if (!iban || !ibanPattern.test(iban) || countryCode != "TR" || iban.length != 26) {
             return res.status(400).json({ message: 'IBAN geçersiz!' });
         }
 
-        const resultInsert = await pool.query('INSERT INTO "' + PREFIX + 'CustomerBankAccounts" ("Id", "CustomerId", "BankId", "IBAN", "CreatedAt", "Active") VALUES ($1, $2, $3, $4, $5, $6)', [id, customerId, bankId, Iban, createTime, active]);
-        return res.status(201).json({ message: 'Banka hesabınız başarılı şekilde eklendi.'});
-    }catch(error){
+        try {
+            const response = await axios.post('http://emakin-web.tokenization.svc.cluster.local:80/rest/v1/initiateByProcess', {
+                apiKey: "4a73969d-c4d1-4908-9a3d-6b080b2e05fe",
+                logonId: "support@bt.guru",
+                logonProvider: "Organization",
+                process: "c45309be-a1f7-4ef9-bf81-c695772911cc",
+                task: "a4245aa9-e0d8-41c9-a3e7-e76d82513ad3",
+                version: null,
+                data: `<BankAccountsManagement>
+                        <CustomerId>${customerId}</CustomerId>
+                        <IBAN>${iban}</IBAN>
+                      </BankAccountsManagement>`,
+                culture: null
+            });
+
+        } catch (error) {
+            return res.status(500).json({ message: 'Banka hesabı eklenemedi! (initiate error)', hata: error.response.data });
+        }
+
+        return res.status(201).json({ message: 'Banka hesabınız başarılı şekilde eklendi.' });
+    } catch (error) {
         return res.status(500).json({ message: 'Banka hesabı eklenemedi!', hata: error.message });
     }
 });
+
 
 // Profile router'ı dışa aktar
 module.exports = profileRouter;
